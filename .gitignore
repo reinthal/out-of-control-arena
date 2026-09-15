@@ -1,0 +1,15 @@
+# devenv / direnv
+.devenv
+.direnv
+
+# python build artifacts
+*.egg-info/
+__pycache__/
+*.pyc
+.venv/
+
+# plaintext env (secrets.env is sops-encrypted and IS tracked)
+.env
+
+# inspect eval logs
+logs/
