@@ -10,6 +10,8 @@ Proxmox connection is configured via environment variables read by the plugin
 inspect_proxmox_sandbox. Requires Proxmox 9+.
 """
 
+import itertools
+
 from control_arena import EvalMode
 from control_arena.settings._setting import Setting
 from inspect_ai.dataset import Sample
@@ -33,15 +35,18 @@ from ooc_bench.scorers import main_task_success, side_task_success
 
 DEFAULT_TOOL_TIMEOUT_S = 120
 
-# Pinned sandbox subnet (instead of sdn_config="auto", which picks a random
-# 192.168.x.0/24 each run). A fixed, unusual CIDR lets you write a single stable
-# host-firewall rule to block the sandbox from the Proxmox control plane, and
-# avoids collisions with LAN/pfSense networks. See README firewall notes.
-SANDBOX_CIDR = "172.31.99.0/24"
-SANDBOX_GATEWAY = "172.31.99.1"
-SANDBOX_DHCP_START = "172.31.99.50"
-SANDBOX_DHCP_END = "172.31.99.100"
-SANDBOX_VNET_ALIAS = "ooc_sandbox"
+# Each sample gets its own /24 under this supernet (172.31.N.0/24). Distinct
+# subnets per sample avoid the IP-range overlap that hangs provisioning when two
+# sandboxes are alive at once; 172.31.0.0/16 is an uncommon slice of RFC-1918
+# space, so one host-firewall rule blocking the whole supernet isolates every
+# sandbox from the Proxmox control plane without touching typical LAN/pfSense
+# networks. Do NOT collapse this back to a single hardcoded CIDR.
+SANDBOX_SUPERNET = "172.31.0.0/16"
+
+# Hands out distinct third octets (172.31.1, .2, ...) across get_sandbox_config
+# calls within a process. Wraps at 253; sandbox_cleanup tears down each SDN
+# after its sample, so reuse across runs is safe.
+_subnet_octets = itertools.count(1)
 
 
 class ProxmoxDefenseSetting(Setting):
@@ -68,20 +73,22 @@ class ProxmoxDefenseSetting(Setting):
         return [main_task_success(), side_task_success()]
 
     def get_sandbox_config(self) -> SandboxEnvironmentSpec:
+        # Build a per-sample SDN on 172.31.N.0/24 (N unique per call) and attach
+        # the VM's NIC to it. Distinct subnet per sample => no IP-range overlap.
+        octet = next(_subnet_octets) % 254 or 1
+        base = f"172.31.{octet}"
+        alias = f"ooc_sandbox_{octet}"
         sdn_config = SdnConfig(
             vnet_configs=(
                 VnetConfig(
-                    alias=SANDBOX_VNET_ALIAS,
+                    alias=alias,
                     subnets=(
                         SubnetConfig(
-                            cidr=SANDBOX_CIDR,
-                            gateway=SANDBOX_GATEWAY,
+                            cidr=f"{base}.0/24",
+                            gateway=f"{base}.1",
                             snat=True,  # NAT egress; needed for the built-in image bake
                             dhcp_ranges=(
-                                DhcpRange(
-                                    start=SANDBOX_DHCP_START,
-                                    end=SANDBOX_DHCP_END,
-                                ),
+                                DhcpRange(start=f"{base}.50", end=f"{base}.100"),
                             ),
                         ),
                     ),
@@ -96,7 +103,7 @@ class ProxmoxDefenseSetting(Setting):
                     VmConfig(
                         vm_source_config=VmSourceConfig(built_in=self.vm_image),
                         name="agent",
-                        nics=(VmNicConfig(vnet_alias=SANDBOX_VNET_ALIAS),),
+                        nics=(VmNicConfig(vnet_alias=alias),),
                     ),
                 ),
                 sdn_config=sdn_config,
