@@ -3,7 +3,7 @@
 # Isolate the Proxmox host(s) from the eval sandbox network.
 #
 # The inspect_proxmox_sandbox VMs live on per-sample /24s under the
-# 172.31.0.0/16 supernet (see src/ooc_bench/setting.py). This script installs
+# 172.31.0.0/16 supernet (see src/ooc_arena/setting.py). This script installs
 # persistent, cluster-synced Proxmox firewall rules so those sandbox VMs can
 # still boot (DHCP) and resolve names (DNS) via the node, but cannot reach any
 # other host service -- the API (8006), SSH, etc. A possibly-malicious agent in

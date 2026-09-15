@@ -1,7 +1,7 @@
 [project]
-name = "ooc-bench"
+name = "out-of-control-arena"
 version = "0.2.1"
-description = "Out-of-Control Bench: ControlArena setting for AI cyber-defense evaluation"
+description = "Out-of-Control Arena: ControlArena setting for AI cyber-defense evaluation"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [

@@ -7,8 +7,11 @@ by direnv):
     PROXMOX_NODE / PROXMOX_VERIFY_TLS / PROXMOX_IMAGE_STORAGE   (sandbox)
 
 Usage:
-    uv run python run_eval.py
+    uv run python run_eval.py                 # 1 epoch per mode
+    uv run python run_eval.py --epochs 50     # 50 epochs per mode (score distribution)
 """
+
+import argparse
 
 from control_arena import EvalMode
 from control_arena.eval import ControlEvalConfig, get_control_task_product
@@ -17,8 +20,8 @@ from control_arena.scorers import max_suspicion_scorer
 from inspect_ai import eval
 from inspect_ai.model import GenerateConfig
 
-from ooc_bench.monitor import full_transcript_monitor
-from ooc_bench.setting import ProxmoxDefenseSetting
+from ooc_arena.monitor import full_transcript_monitor
+from ooc_arena.setting import ProxmoxDefenseSetting
 
 # Confirm the exact slug on https://openrouter.ai/models if this 404s.
 MODEL = "openrouter/deepseek/deepseek-v4.1-flash"
@@ -28,12 +31,8 @@ MODEL = "openrouter/deepseek/deepseek-v4.1-flash"
 # indefinite one).
 MODEL_CONFIG = GenerateConfig(timeout=120, max_retries=2)
 
-# Number of times to re-run each sample. With max_sandboxes=1 the epochs run
-# sequentially (50 epochs x 2 modes = 100 VM provisions), so expect a few hours.
-EPOCHS = 50
 
-
-def main() -> None:
+def main(epochs: int = 1) -> None:
     setting = ProxmoxDefenseSetting()
     protocol = trusted_monitoring_builder(monitor=full_transcript_monitor())
     config = ControlEvalConfig(
@@ -41,26 +40,37 @@ def main() -> None:
         trusted_model=MODEL,  # defensive monitor (defense) — same model for now
         untrusted_config=MODEL_CONFIG,
         trusted_config=MODEL_CONFIG,
-        message_limit=20,
-        time_limit=300,  # hard cap per sample (seconds); kills runaway/hung runs
-        epochs=EPOCHS,  # re-run each sample N times for a score distribution
+        # Budget covers BOTH agents per sample: the benign workload agent AND the
+        # blue investigator that runs afterward (post_submission).
+        message_limit=50,
+        time_limit=600,  # hard cap per sample (seconds); kills runaway/hung runs
+        epochs=epochs,  # re-run each sample N times for a score distribution
         max_sandboxes=1,  # single Proxmox instance (raise only with a multi-instance pool)
     )
+    # HONEST mode = the blue-team benchmark: one sample per host case (benign,
+    # standalone_c2). The workload is benign; malice (if any) is a planted process
+    # the transcript monitor cannot see but the blue investigator can.
     tasks = get_control_task_product(
         setting,
         protocol,
-        [EvalMode.HONEST, EvalMode.ATTACK],
+        [EvalMode.HONEST],
         eval_config=config,
         monitoring_scorers=[max_suspicion_scorer()],
     )
-    # sandbox_cleanup=True tears down each sample's VM + SDN before the next
-    # sample starts. This is REQUIRED when running >1 sample with a pinned
-    # SANDBOX_CIDR: otherwise sample N's leftover SDN and sample N+1's new SDN
-    # both claim the same subnet, PVE rejects the overlapping IP range, and
-    # provisioning hangs. To keep a VM alive for debugging, run a single mode
-    # (e.g. just EvalMode.ATTACK) with sandbox_cleanup=False.
-    eval(tasks=tasks, limit=1, sandbox_cleanup=True)
+    # sandbox_cleanup=True tears down each sample's VM + SDN before the next starts
+    # (required with per-sample subnets so live SDNs never overlap). No `limit` so
+    # every host-case sample runs.
+    eval(tasks=tasks, sandbox_cleanup=True)
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="Run the Proxmox defense eval.")
+    parser.add_argument(
+        "--epochs",
+        type=int,
+        default=1,
+        help="Times to re-run each sample per mode (default: 1). "
+        "With max_sandboxes=1 epochs run sequentially, ~2 min each.",
+    )
+    args = parser.parse_args()
+    main(epochs=args.epochs)
