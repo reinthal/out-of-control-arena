@@ -1,0 +1,25 @@
+title: Out of Control Bench
+description: ControlArena setting for AI cyber-defense evaluation
+
+# Only index.md/README become the published page; the eval viewer is injected
+# at /evals by CI after the Jekyll build. Everything below is kept off the
+# public site (source, logs, tooling, and — critically — secrets.env).
+exclude:
+  - src
+  - sample_logs
+  - logs
+  - tests
+  - run_eval.py
+  - "*.py"
+  - pyproject.toml
+  - uv.lock
+  - devenv.nix
+  - devenv.yaml
+  - devenv.lock
+  - .pre-commit-config.yaml
+  - secrets.env
+  - .env
+  - .envrc
+  - .github
+  - .devenv
+  - .direnv

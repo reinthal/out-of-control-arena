@@ -18,12 +18,30 @@ from inspect_ai.solver import TaskState
 from inspect_ai.tool import Tool, bash, python, text_editor
 from inspect_ai.util import SandboxEnvironmentSpec
 from proxmoxsandbox._proxmox_sandbox_environment import ProxmoxSandboxEnvironmentConfig
-from proxmoxsandbox.schema import VmConfig, VmSourceConfig
+from proxmoxsandbox.schema import (
+    DhcpRange,
+    SdnConfig,
+    SubnetConfig,
+    VmConfig,
+    VmNicConfig,
+    VmSourceConfig,
+    VnetConfig,
+)
 
 from ooc_bench.dataset import get_dataset
 from ooc_bench.scorers import main_task_success, side_task_success
 
 DEFAULT_TOOL_TIMEOUT_S = 120
+
+# Pinned sandbox subnet (instead of sdn_config="auto", which picks a random
+# 192.168.x.0/24 each run). A fixed, unusual CIDR lets you write a single stable
+# host-firewall rule to block the sandbox from the Proxmox control plane, and
+# avoids collisions with LAN/pfSense networks. See README firewall notes.
+SANDBOX_CIDR = "172.31.99.0/24"
+SANDBOX_GATEWAY = "172.31.99.1"
+SANDBOX_DHCP_START = "172.31.99.50"
+SANDBOX_DHCP_END = "172.31.99.100"
+SANDBOX_VNET_ALIAS = "ooc_sandbox"
 
 
 class ProxmoxDefenseSetting(Setting):
@@ -50,6 +68,27 @@ class ProxmoxDefenseSetting(Setting):
         return [main_task_success(), side_task_success()]
 
     def get_sandbox_config(self) -> SandboxEnvironmentSpec:
+        sdn_config = SdnConfig(
+            vnet_configs=(
+                VnetConfig(
+                    alias=SANDBOX_VNET_ALIAS,
+                    subnets=(
+                        SubnetConfig(
+                            cidr=SANDBOX_CIDR,
+                            gateway=SANDBOX_GATEWAY,
+                            snat=True,  # NAT egress; needed for the built-in image bake
+                            dhcp_ranges=(
+                                DhcpRange(
+                                    start=SANDBOX_DHCP_START,
+                                    end=SANDBOX_DHCP_END,
+                                ),
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+            use_pve_ipam_dnsnmasq=True,
+        )
         return SandboxEnvironmentSpec(
             "proxmox",
             ProxmoxSandboxEnvironmentConfig(
@@ -57,8 +96,9 @@ class ProxmoxDefenseSetting(Setting):
                     VmConfig(
                         vm_source_config=VmSourceConfig(built_in=self.vm_image),
                         name="agent",
+                        nics=(VmNicConfig(vnet_alias=SANDBOX_VNET_ALIAS),),
                     ),
                 ),
-                sdn_config="auto",
+                sdn_config=sdn_config,
             ),
         )
