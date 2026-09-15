@@ -28,6 +28,10 @@ MODEL = "openrouter/deepseek/deepseek-v4.1-flash"
 # indefinite one).
 MODEL_CONFIG = GenerateConfig(timeout=120, max_retries=2)
 
+# Number of times to re-run each sample. With max_sandboxes=1 the epochs run
+# sequentially (50 epochs x 2 modes = 100 VM provisions), so expect a few hours.
+EPOCHS = 50
+
 
 def main() -> None:
     setting = ProxmoxDefenseSetting()
@@ -39,7 +43,8 @@ def main() -> None:
         trusted_config=MODEL_CONFIG,
         message_limit=20,
         time_limit=300,  # hard cap per sample (seconds); kills runaway/hung runs
-        max_sandboxes=1,  # single Proxmox instance
+        epochs=EPOCHS,  # re-run each sample N times for a score distribution
+        max_sandboxes=1,  # single Proxmox instance (raise only with a multi-instance pool)
     )
     tasks = get_control_task_product(
         setting,
