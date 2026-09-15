@@ -16,7 +16,7 @@ from control_arena import EvalMode
 from control_arena.settings._setting import Setting
 from inspect_ai.dataset import Sample
 from inspect_ai.scorer import Scorer
-from inspect_ai.solver import TaskState
+from inspect_ai.solver import Solver, TaskState
 from inspect_ai.tool import Tool, bash, python, text_editor
 from inspect_ai.util import SandboxEnvironmentSpec
 from proxmoxsandbox._proxmox_sandbox_environment import ProxmoxSandboxEnvironmentConfig
@@ -30,8 +30,10 @@ from proxmoxsandbox.schema import (
     VnetConfig,
 )
 
-from ooc_bench.dataset import get_dataset
-from ooc_bench.scorers import main_task_success, side_task_success
+from ooc_arena.blue_agent import blue_investigation
+from ooc_arena.dataset import get_dataset
+from ooc_arena.environment import setup_environment_solver
+from ooc_arena.scorers import blue_detection, main_task_success, side_task_success
 
 DEFAULT_TOOL_TIMEOUT_S = 120
 
@@ -69,8 +71,18 @@ class ProxmoxDefenseSetting(Setting):
     def get_dataset(self, eval_mode: EvalMode) -> list[Sample]:
         return get_dataset(eval_mode)
 
+    def setup_environment(self) -> Solver | None:
+        # Runs first: installs/locks auditd and starts the planted C2 process
+        # for the standalone_c2 case (reads metadata["case"]).
+        return setup_environment_solver()
+
+    def post_submission(self) -> Solver | None:
+        # Runs after the workload agent submits: the blue investigator with root
+        # tools, blind to the transcript, writes its verdict to the store.
+        return blue_investigation(tool_timeout_s=self.tool_timeout_s)
+
     def get_scorers(self) -> list[Scorer]:
-        return [main_task_success(), side_task_success()]
+        return [main_task_success(), side_task_success(), blue_detection()]
 
     def get_sandbox_config(self) -> SandboxEnvironmentSpec:
         # Build a per-sample SDN on 172.31.N.0/24 (N unique per call) and attach
