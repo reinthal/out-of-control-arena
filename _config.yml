@@ -6,6 +6,7 @@ description: ControlArena setting for AI cyber-defense evaluation
 # public site (source, logs, tooling, and — critically — secrets.env).
 exclude:
   - src
+  - research-log
   - sample_logs
   - logs
   - tests
