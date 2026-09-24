@@ -19,6 +19,7 @@ dependencies = [
     "matplotlib>=3.10.7",
     "control-arena>=19.0.0",
     "inspect-proxmox-sandbox",
+    "tenacity>=9.1.4",
 ]
 
 [dependency-groups]

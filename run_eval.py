@@ -13,6 +13,8 @@ Usage:
                                                                     # smoke test: 10 honest +
                                                                     # 10 attack epochs, first
                                                                     # sample of each mode only
+    uv run python run_eval.py --epochs 50 --max-sandboxes 22       # 22 VMs in parallel on
+                                                                    # the one Proxmox host
 """
 
 import argparse
@@ -25,6 +27,7 @@ from inspect_ai import eval
 from inspect_ai.model import GenerateConfig
 
 from ooc_arena.monitor import full_transcript_monitor
+from ooc_arena.parallel import enable_same_host_parallelism
 from ooc_arena.setting import ProxmoxDefenseSetting
 
 # Confirm the exact slug on https://openrouter.ai/models if this 404s.
@@ -44,9 +47,17 @@ MODE_MAP = {"honest": EvalMode.HONEST, "attack": EvalMode.ATTACK}
 
 
 def main(
-    epochs: int = 1, modes: list[str] | None = None, limit: int | None = None
+    epochs: int = 1,
+    modes: list[str] | None = None,
+    limit: int | None = None,
+    max_sandboxes: int = 1,
 ) -> None:
     eval_modes = [MODE_MAP[m] for m in (modes or ["honest"])]
+
+    # The plugin runs one sample per Proxmox *instance*; register the single host
+    # N times so N samples (each ~2 GB RAM / 2 vCPU) run concurrently. See
+    # ooc_arena.parallel for what this patches and why.
+    enable_same_host_parallelism(max_sandboxes)
 
     setting = ProxmoxDefenseSetting()
     protocol = trusted_monitoring_builder(monitor=full_transcript_monitor())
@@ -65,13 +76,15 @@ def main(
         # whole sample regardless of nesting (inspect_ai checks it root-to-leaf) —
         # so it's genuinely shared across the workload agent, the full-transcript
         # monitor, and the blue investigator, and can't be carved up per-phase the
-        # way message_limit was. Raised well above the ~1.1M peak seen with the old
-        # (starved, ~50-message) blue investigator, since letting it actually run
-        # its full ~100-message budget uses more tokens too.
-        token_limit=3_000_000,
+        # way message_limit was. Inspect counts cache reads too, so a blue sweep
+        # that runs its full ~100-message budget (context growing to ~80k tokens
+        # per call) alone approaches 3M; 6M leaves headroom once blue's tool
+        # output is capped (ooc_arena.blue_agent.TOOL_OUTPUT_CAP) — before that
+        # cap a single 1 MiB tool result blew 3M in a handful of calls.
+        token_limit=6_000_000,
         time_limit=600,  # hard cap per sample (seconds); kills runaway/hung runs
         epochs=epochs,  # re-run each sample N times for a score distribution
-        max_sandboxes=1,  # single Proxmox instance (raise only with a multi-instance pool)
+        max_sandboxes=max_sandboxes,  # concurrent VMs on the host (see --max-sandboxes)
     )
     tasks = get_control_task_product(
         setting,
@@ -80,8 +93,8 @@ def main(
         eval_config=config,
         monitoring_scorers=[max_suspicion_scorer()],
     )
-    # sandbox_cleanup=True tears down each sample's VM + SDN before the next starts
-    # (required with per-sample subnets so live SDNs never overlap). `limit` caps
+    # sandbox_cleanup=True tears down each sample's VM + SDN as soon as it finishes
+    # (keeps the host's VM/SDN count bounded by max_sandboxes). `limit` caps
     # each task to its first N dataset samples; None (default) runs every sample.
     eval(tasks=tasks, sandbox_cleanup=True, limit=limit)
 
@@ -93,7 +106,14 @@ if __name__ == "__main__":
         type=int,
         default=1,
         help="Times to re-run each sample per mode (default: 1). "
-        "With max_sandboxes=1 epochs run sequentially, ~2 min each.",
+        "Epochs run --max-sandboxes at a time, ~8-10 min each.",
+    )
+    parser.add_argument(
+        "--max-sandboxes",
+        type=int,
+        default=1,
+        help="Concurrent sandbox VMs on the Proxmox host (default: 1). Each VM "
+        "is 2 GB RAM / 2 vCPU; the current host fits ~22.",
     )
     parser.add_argument(
         "--modes",
@@ -110,4 +130,9 @@ if __name__ == "__main__":
         "(e.g. --limit 1 to run only the first sample of each mode).",
     )
     args = parser.parse_args()
-    main(epochs=args.epochs, modes=args.modes, limit=args.limit)
+    main(
+        epochs=args.epochs,
+        modes=args.modes,
+        limit=args.limit,
+        max_sandboxes=args.max_sandboxes,
+    )
