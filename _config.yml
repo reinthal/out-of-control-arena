@@ -1,4 +1,4 @@
-title: Out of Control Bench
+title: Out of Control Arena
 description: ControlArena setting for AI cyber-defense evaluation
 
 # Only index.md/README become the published page; the eval viewer is injected
@@ -6,6 +6,7 @@ description: ControlArena setting for AI cyber-defense evaluation
 # public site (source, logs, tooling, and — critically — secrets.env).
 exclude:
   - src
+  - research-log
   - sample_logs
   - logs
   - tests

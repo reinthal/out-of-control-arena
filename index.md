@@ -1,5 +1,5 @@
 ---
-title: Out of Control Bench
+title: Out of Control Arena
 ---
 
 {% include_relative README.md %}

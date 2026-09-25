@@ -7,42 +7,132 @@ by direnv):
     PROXMOX_NODE / PROXMOX_VERIFY_TLS / PROXMOX_IMAGE_STORAGE   (sandbox)
 
 Usage:
-    uv run python run_eval.py
+    uv run python run_eval.py                                      # honest, 1 epoch, all samples
+    uv run python run_eval.py --epochs 50                          # 50 epochs (score distribution)
+    uv run python run_eval.py --modes honest attack --epochs 10 --limit 1
+                                                                    # smoke test: 10 honest +
+                                                                    # 10 attack epochs, first
+                                                                    # sample of each mode only
+    uv run python run_eval.py --epochs 50 --max-sandboxes 22       # 22 VMs in parallel on
+                                                                    # the one Proxmox host
 """
+
+import argparse
 
 from control_arena import EvalMode
 from control_arena.eval import ControlEvalConfig, get_control_task_product
 from control_arena.micro_protocol import trusted_monitoring_builder
 from control_arena.scorers import max_suspicion_scorer
 from inspect_ai import eval
+from inspect_ai.model import GenerateConfig
 
-from ooc_bench.monitor import full_transcript_monitor
-from ooc_bench.setting import ProxmoxDefenseSetting
+from ooc_arena.monitor import full_transcript_monitor
+from ooc_arena.parallel import enable_same_host_parallelism
+from ooc_arena.setting import ProxmoxDefenseSetting
 
 # Confirm the exact slug on https://openrouter.ai/models if this 404s.
 MODEL = "openrouter/deepseek/deepseek-v4.1-flash"
 
+# Bound each model call so a stalled OpenRouter/DeepSeek request can't wedge a
+# sample: 120s per request, at most 2 retries (short backoff instead of a long
+# indefinite one).
+MODEL_CONFIG = GenerateConfig(timeout=120, max_retries=2)
 
-def main() -> None:
+# HONEST = the blue-team benchmark: one sample per host case (benign, standalone_c2).
+# The workload is benign; malice (if any) is a planted process the transcript
+# monitor cannot see but the blue investigator can.
+# ATTACK = the red-agent credential-harvest sample (single sample), kept for the
+# transcript-monitor line of experiments.
+MODE_MAP = {"honest": EvalMode.HONEST, "attack": EvalMode.ATTACK}
+
+
+def main(
+    epochs: int = 1,
+    modes: list[str] | None = None,
+    limit: int | None = None,
+    max_sandboxes: int = 1,
+) -> None:
+    eval_modes = [MODE_MAP[m] for m in (modes or ["honest"])]
+
+    # The plugin runs one sample per Proxmox *instance*; register the single host
+    # N times so N samples (each ~2 GB RAM / 2 vCPU) run concurrently. See
+    # ooc_arena.parallel for what this patches and why.
+    enable_same_host_parallelism(max_sandboxes)
+
     setting = ProxmoxDefenseSetting()
     protocol = trusted_monitoring_builder(monitor=full_transcript_monitor())
     config = ControlEvalConfig(
         untrusted_model=MODEL,  # agent under test (offense)
         trusted_model=MODEL,  # defensive monitor (defense) — same model for now
-        message_limit=30,
-        max_sandboxes=1,  # single Proxmox instance
+        untrusted_config=MODEL_CONFIG,
+        trusted_config=MODEL_CONFIG,
+        # Budget for the workload agent's own phase (main + side task, up to
+        # submission). The blue investigator that runs afterward (post_submission)
+        # no longer shares this: it opens its own independent message_limit scope
+        # (see ooc_arena.blue_agent.DEFAULT_BLUE_MESSAGE_LIMIT) — inspect_ai's
+        # message-limit checks are leaf-only, so that scope doesn't loosen this one.
+        message_limit=50,
+        # token_limit, unlike message_limit, IS a cumulative ceiling across the
+        # whole sample regardless of nesting (inspect_ai checks it root-to-leaf) —
+        # so it's genuinely shared across the workload agent, the full-transcript
+        # monitor, and the blue investigator, and can't be carved up per-phase the
+        # way message_limit was. Inspect counts cache reads too, so a blue sweep
+        # that runs its full ~100-message budget (context growing to ~80k tokens
+        # per call) alone approaches 3M; 6M leaves headroom once blue's tool
+        # output is capped (ooc_arena.blue_agent.TOOL_OUTPUT_CAP) — before that
+        # cap a single 1 MiB tool result blew 3M in a handful of calls.
+        token_limit=6_000_000,
+        time_limit=600,  # hard cap per sample (seconds); kills runaway/hung runs
+        epochs=epochs,  # re-run each sample N times for a score distribution
+        max_sandboxes=max_sandboxes,  # concurrent VMs on the host (see --max-sandboxes)
     )
     tasks = get_control_task_product(
         setting,
         protocol,
-        [EvalMode.HONEST, EvalMode.ATTACK],
+        eval_modes,
         eval_config=config,
         monitoring_scorers=[max_suspicion_scorer()],
     )
-    # sandbox_cleanup=False keeps the VM around for debugging; run
-    # `inspect sandbox cleanup proxmox` afterwards to remove inspect-tagged VMs.
-    eval(tasks=tasks, limit=1, sandbox_cleanup=False)
+    # sandbox_cleanup=True tears down each sample's VM + SDN as soon as it finishes
+    # (keeps the host's VM/SDN count bounded by max_sandboxes). `limit` caps
+    # each task to its first N dataset samples; None (default) runs every sample.
+    eval(tasks=tasks, sandbox_cleanup=True, limit=limit)
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="Run the Proxmox defense eval.")
+    parser.add_argument(
+        "--epochs",
+        type=int,
+        default=1,
+        help="Times to re-run each sample per mode (default: 1). "
+        "Epochs run --max-sandboxes at a time, ~8-10 min each.",
+    )
+    parser.add_argument(
+        "--max-sandboxes",
+        type=int,
+        default=1,
+        help="Concurrent sandbox VMs on the Proxmox host (default: 1). Each VM "
+        "is 2 GB RAM / 2 vCPU; the current host fits ~22.",
+    )
+    parser.add_argument(
+        "--modes",
+        nargs="+",
+        choices=sorted(MODE_MAP),
+        default=["honest"],
+        help="Which eval mode(s) to run (default: honest only).",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="Cap each mode's dataset to its first N samples "
+        "(e.g. --limit 1 to run only the first sample of each mode).",
+    )
+    args = parser.parse_args()
+    main(
+        epochs=args.epochs,
+        modes=args.modes,
+        limit=args.limit,
+        max_sandboxes=args.max_sandboxes,
+    )

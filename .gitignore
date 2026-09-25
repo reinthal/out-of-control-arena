@@ -13,3 +13,6 @@ __pycache__/
 
 # inspect eval logs
 logs/
+
+# inspect per-sample eval logs
+sample_logs/
