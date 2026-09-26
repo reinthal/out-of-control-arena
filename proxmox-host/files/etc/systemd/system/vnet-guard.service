@@ -1,0 +1,13 @@
+[Unit]
+Description=Block SDN guests from reaching the Proxmox host
+Wants=network-pre.target
+Before=network-pre.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft -f /etc/vnet-guard.nft
+ExecStop=/usr/sbin/nft delete table inet vnet_guard
+
+[Install]
+WantedBy=multi-user.target

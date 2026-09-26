@@ -1,0 +1,19 @@
+#!/usr/sbin/nft -f
+# Block guests (SDN VNets / any non-uplink bridge) from reaching the Proxmox host itself.
+# Forwarded VM->internet traffic is not affected (that's the forward hook, not input).
+table inet vnet_guard
+delete table inet vnet_guard
+
+table inet vnet_guard {
+	chain input {
+		type filter hook input priority filter - 10; policy accept;
+
+		iifname { "lo", "vmbr0" } accept		# host uplink + loopback: untouched
+		ct state established,related accept		# replies to connections the host opened
+		udp dport 67 accept				# DHCP (SDN dnsmasq)
+		meta l4proto { tcp, udp } th dport 53 accept	# DNS (SDN dnsmasq on gateway IPs)
+		icmp type echo-request accept			# ping the gateway
+		iifname "vnet1" ip saddr 10.10.1.101 tcp dport 8006 accept	# nix VM (101) -> PVE API
+		counter drop comment "guest -> host blocked"
+	}
+}

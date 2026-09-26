@@ -1,0 +1,15 @@
+auto lo
+iface lo inet loopback
+
+iface nic0 inet manual
+
+auto vmbr0
+iface vmbr0 inet static
+	address 78.46.98.89/27
+	gateway 78.46.98.65
+	bridge-ports nic0
+	bridge-stp off
+	bridge-fd 0
+
+
+source /etc/network/interfaces.d/*

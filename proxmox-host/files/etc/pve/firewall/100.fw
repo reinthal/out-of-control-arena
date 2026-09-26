@@ -1,0 +1,8 @@
+[OPTIONS]
+enable: 1
+policy_in: ACCEPT
+ipfilter: 1
+macfilter: 1
+
+[IPSET ipfilter-net0]
+10.10.1.100
