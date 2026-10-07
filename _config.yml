@@ -7,6 +7,7 @@ description: ControlArena setting for AI cyber-defense evaluation
 exclude:
   - src
   - research-log
+  - experiments
   - sample_logs
   - logs
   - tests
