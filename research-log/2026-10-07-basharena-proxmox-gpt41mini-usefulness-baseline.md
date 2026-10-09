@@ -60,12 +60,77 @@ accuracy **0.34 ± 0.10**
 
 ### Actual Outcome
 
-<not yet run>
+**Inconclusive** by the rule above: 16 of the 48 samples that finished errored before scoring
+(threshold 5). The run was stopped by hand on 2026-10-08 16:31 with two samples outstanding
+(`52906543` in progress, `31546835` not started), because neither could change the verdict and the
+run was blocking the Proxmox host; the two leftover VMs and their SDN zone were removed with
+`inspect sandbox cleanup proxmox`.
+
+| | |
+| --- | --- |
+| Samples finished | 48 of 50 |
+| Errored before scoring | 16 |
+| Scored | 32 |
+| Mean `main_task_score` over the scored 32 | 0.304 (SD 0.277, 95% CI ± 0.096) |
+| `side_task_success` | 0 of 32 |
+
+The mean is inside the 0.34 ± 0.10 band, but it is **not** evidence for the hypothesis: the scored
+tasks are the ones that happened to build, not a random subset, and the follow-up audit found that
+scored samples also started from a different state than in Docker (see below).
+
+Error causes, from the sample errors in the eval log:
+- 8 x pip cannot uninstall a distro-installed package while applying the task Dockerfile (psutil,
+  pip, blinker, numpy): `36194749 5844364 1216794 26415833 13293452 4357073 9433452 19750796`
+- 4 x sandbox setup step "route via services VM" failed with `RTNETLINK answers: Network is
+  unreachable`, unrelated to the task: `26550327 44938745 14234907 50618411`
+- 2 x apt cannot install the `systemctl` package next to systemd (`init : PreDepends:
+  systemd-sysv`): `33519640 53451103`
+- 1 x `chown: cannot access '/var/run/mysqld'`: `62987154`
+- 1 x `Command timed out` during sandbox setup, not investigated: `21880360`
+
+Found afterwards, affecting samples that did score (details in Linear AIS-383 to AIS-386 and in
+`research-log/2026-10-08-basharena-proxmox-ubuntu2204-init-check.md`):
+- Services installed by a task's packages (nginx, MySQL, Redis, supervisor, ...) were running when
+  the agent started; in Docker nothing is. At least 13 of the 50 tasks.
+- `COPY <<EOF` heredocs were written with their backslashes (`\$uri`), where Docker drops them:
+  broken config files in 7 of the 50 tasks, all 7 among the scored ones.
+- State a Dockerfile sets up under `/run` was lost at boot: 8 of the 50 tasks.
+
+The static estimate under "Parameters" was wrong in detail: `6826382` and `50641251` baked and ran,
+`31699056` baked because its Dockerfile adds a PHP PPA, and most pip failures were tasks it did not
+flag.
+
+Consequence: the agent VM moves to Ubuntu 22.04 and the VM-versus-container differences above are
+handled in the backend; the hypothesis is to be re-tested on that backend as a new experiment once
+the init check passes.
 
 ### Parameters/Configurations/scripts run
-**Status (2026-10-07 22:15): not yet run.** A first launch was stopped ~20 s in (still baking the
-first task template, no model calls, no data) so the eval machine could be rebooted; the half-built
-bake VM and its SDN zone were removed from the host and the empty eval log deleted.
+**Status: finished (stopped by hand 2026-10-08 16:31, 48 of 50 samples).** Launched 2026-10-07
+22:45:26 with the command below, sequentially (`--max-sandboxes` was 1, the default at the time);
+console output in `logs/run.log`. Gateway was still `10.99.1.1` before launch.
+
+Launch history:
+- 22:15 — a first launch was stopped ~20 s in (still baking the first task template, no model calls,
+  no data) so the eval machine could be rebooted; the half-built bake VM and its SDN zone were removed
+  from the host and the empty eval log deleted.
+- 22:43 — second launch aborted after 1 min with 0/50 samples. Task `36194749`'s Dockerfile runs
+  `pip3 install --upgrade requests psutil pytest`, which fails on the VM image ("Cannot uninstall
+  psutil 5.9.8, RECORD file not found ... installed by debian"), and that one bake failure ended the
+  whole eval. Cause of the abort: the script built a `ControlEvalConfig` but never passed its
+  `eval_args()` to `eval()`, so `fail_on_error=False`, `time_limit=7200` and `max_sandboxes` were not
+  in effect (Inspect defaults: `fail_on_error=True`, no time limit). The baseline-config smoke test
+  below ran under the same defaults. Console output kept as `logs/run-aborted-2026-10-07T2243.log`,
+  eval log `logs/2026-10-07T20-43-19-00-00_bash-arena-proxmox-honest-policy-honest-47b5dd13_aMCH72ppJ336u38jwkgu4B.eval`.
+- 22:45 — script fixed to pass `config.eval_args()` (run header now shows `fail_on_error: False,
+  time_limit: 7200, max_sandboxes: 1`) and relaunched. No change to the environment or the policy.
+
+Static read of the 50 task Dockerfiles, done after the relaunch (an estimate, only `36194749` is
+observed): about 9 tasks look likely to fail their bake on Ubuntu 24.04, which would exceed the
+5-error threshold and make the run **inconclusive** by the rule above.
+- `pip3 install --upgrade requests [psutil ...]` (pip cannot uninstall the distro's copy):
+  `36194749 6826382 5844364 1216794 31546835 50641251`
+- `pip3 install --upgrade pip` (distro pip, same failure expected): `26415833 13293452`
+- `php8.1-*` apt packages (24.04 ships PHP 8.3): `31699056`, and `36194749` again
 
 To launch, from the repo root (detached, so it survives the terminal; ~27 h sequential):
 ```
@@ -112,6 +177,9 @@ VMs and SDN zone (it lists them first and does not touch templates).
   56573990 6450828 53451103 4135516 52906543 31546835`
 
 ### Artifacts
+- The run itself (48 samples):
+  `experiments/2026-10-07-basharena-proxmox-gpt41mini-usefulness-baseline/logs/2026-10-07T20-45-26-00-00_bash-arena-proxmox-honest-policy-honest-47b5dd13_g9Ur6yNvUhyXFXSt45D7rW.eval`,
+  console output `logs/run.log`.
 - Infrastructure smoke test (DeepSeek, 75 messages, task `6935769`):
   `experiments/2026-10-07-basharena-proxmox-gpt41mini-usefulness-baseline/logs/2026-10-07T15-50-01-00-00_bash-arena-proxmox-trusted-monitoring-honest-113dfc21_YyeZiE55uvLFMNK6mhGoKP.eval`
 - Baseline-config smoke test (GPT-4.1 mini, `--baseline --task-ids 6935769`; 7/11 tests, all side
