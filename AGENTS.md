@@ -56,7 +56,10 @@ How parallelism works here (`src/ooc_arena/parallel.py`):
   using).
 - Runs no longer sweep "orphan" VMs off the host at sample start. After a killed run, remove what it
   left with `sops exec-env secrets.env 'uv run inspect sandbox cleanup proxmox'`, and only while no
-  eval is running: that command removes every sandbox VM on the host.
+  eval is running: that command removes every sandbox VM on the host. It asks for confirmation only
+  on an interactive terminal. Run from a script or an agent's shell it deletes at once, whatever is
+  piped into it, so it cannot be used to list what is on the host. Check for a running eval by its
+  process and log instead.
 
 Record the `--max-sandboxes` value used in the research-log entry, and when a sequential run was
 chosen, why.
