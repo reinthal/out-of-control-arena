@@ -1,12 +1,17 @@
-"""Run N sandbox samples concurrently on ONE Proxmox host.
+"""Share ONE Proxmox host between concurrent samples and concurrent evals.
 
 inspect_proxmox_sandbox (0.11) hands out Proxmox *instances* from a pool and
 guarantees each instance runs one sample at a time, so concurrency == number of
 configured instances. With a single PROXMOX_HOST that is 1, regardless of
 `max_sandboxes`. To use a big host we register the same host N times (distinct
-`instance_id`, same `pool_id`) through PROXMOX_CONFIG_FILE.
+`instance_id`, same `pool_id`) through PROXMOX_CONFIG_FILE
+(`enable_same_host_parallelism`).
 
-Three plugin behaviours assume an instance is exclusive and are patched here:
+Independently of N, the plugin assumes that whoever holds an instance owns the
+whole host. `share_proxmox_host` removes that assumption, so that several
+samples, and several eval processes started from this machine, can use the host
+at once. It is applied whenever this package's sandboxes are used. Three plugin
+behaviours are patched:
 
 1. `_ensure_instance_clean` (every sample start) treats *any* provider-managed
    VNET on the host as an orphan and sweeps every provider VM/VNET — including
@@ -19,15 +24,29 @@ Three plugin behaviours assume an instance is exclusive and are patched here:
    Proxmox rejects it ("Duplicate IP range"). `create_sdn_and_vms` runs under
    the plugin's per-host lock, so we allocate a free 172.31.N.0/24 there by
    reading the host's live subnets, and rewrite the sample's SDN config.
+
+The plugin's lock is per process, so allocation and VM creation additionally
+run under a lock file (`host_lock`) shared by every eval process on this
+machine. Evals started from *another* machine against the same host are not
+coordinated with these.
+
+Without the sweeps, VMs left behind by a killed run stay on the host until they
+are removed by hand (`inspect sandbox cleanup proxmox` while nothing is running:
+that command still sweeps the whole host).
 """
 
+import contextlib
+import fcntl
 import ipaddress
 import json
 import logging
 import os
 import tempfile
+from collections.abc import AsyncIterator
 from typing import Any
 
+import anyio
+import platformdirs
 from proxmoxsandbox._impl.infra_commands import InfraCommands
 from proxmoxsandbox._proxmox_sandbox_environment import ProxmoxSandboxEnvironment
 from proxmoxsandbox.schema import SdnConfig
@@ -35,6 +54,10 @@ from proxmoxsandbox.schema import SdnConfig
 from ooc_arena.setting import SANDBOX_SUPERNET
 
 logger = logging.getLogger(__name__)
+
+# Memory on the Proxmox host that sandbox VMs may use; evals should fill it.
+# Sizes the default number of concurrent samples (see AGENTS.md).
+PROXMOX_MEMORY_MB = 40 * 1024
 
 _PATCHED = False
 _SUPERNET = ipaddress.IPv4Network(SANDBOX_SUPERNET)
@@ -95,28 +118,34 @@ def _rewrite_octet(sdn_config: SdnConfig, new_octet: int) -> SdnConfig:
     return SdnConfig.model_validate(fix(sdn_config.model_dump(mode="json")))
 
 
-def enable_same_host_parallelism(n: int) -> None:
-    """Allow up to `n` concurrent samples on the single PROXMOX_HOST.
+@contextlib.asynccontextmanager
+async def host_lock(name: str) -> AsyncIterator[None]:
+    """Hold the lock `name` for the Proxmox host across all local eval processes.
 
-    Must be called before inspect_ai.eval() (the pool is initialised lazily at
-    eval start). No-op for n <= 1.
+    Not reentrant: do not take the same name twice in one task.
+    """
+    host = os.environ.get("PROXMOX_HOST", "config")
+    lock_dir = platformdirs.user_cache_path("ooc_arena") / "locks"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    with open(lock_dir / f"proxmox-{host}-{name}.lock", "w") as f:
+        while True:
+            try:
+                fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                await anyio.sleep(1)
+        try:
+            yield
+        finally:
+            fcntl.flock(f, fcntl.LOCK_UN)
+
+
+def share_proxmox_host() -> None:
+    """Stop the plugin treating the Proxmox host as exclusive to one sample.
+
+    Idempotent. Must run before the first sample starts.
     """
     global _PATCHED
-    if n <= 1:
-        return
-    if os.environ.get("PROXMOX_CONFIG_FILE"):
-        raise RuntimeError(
-            "PROXMOX_CONFIG_FILE is already set; same-host parallelism only "
-            "applies to the single-host PROXMOX_* env configuration."
-        )
-
-    # Contains the password: private tempfile, never written into the repo.
-    fd, path = tempfile.mkstemp(prefix="proxmox-instances-", suffix=".json")
-    with os.fdopen(fd, "w") as f:
-        f.write(_instances_json(n))
-    os.chmod(path, 0o600)
-    os.environ["PROXMOX_CONFIG_FILE"] = path
-
     if not _PATCHED:
         # 1. no host-wide orphan sweep at sample start
         async def _no_instance_sweep(_cls, _infra_commands, instance_id) -> None:
@@ -139,19 +168,47 @@ def enable_same_host_parallelism(n: int) -> None:
         async def _create_with_free_subnet(
             self, proxmox_ids_start, sdn_config, vms_config
         ):
-            if isinstance(sdn_config, SdnConfig):
-                used = await _used_third_octets(self)
-                free = next((o for o in range(1, 255) if o not in used), None)
-                if free is None:
-                    raise RuntimeError(f"no free /24 left under {SANDBOX_SUPERNET}")
-                sdn_config = _rewrite_octet(sdn_config, free)
-                logger.info(
-                    f"{proxmox_ids_start}: allocated 172.31.{free}.0/24 "
-                    f"(in use: {sorted(used)})"
+            # Subnet choice, zone and VM ids are all "first free one on the
+            # host": one process at a time.
+            async with host_lock("create"):
+                if isinstance(sdn_config, SdnConfig):
+                    used = await _used_third_octets(self)
+                    free = next((o for o in range(1, 255) if o not in used), None)
+                    if free is None:
+                        raise RuntimeError(f"no free /24 left under {SANDBOX_SUPERNET}")
+                    sdn_config = _rewrite_octet(sdn_config, free)
+                    logger.info(
+                        f"{proxmox_ids_start}: allocated 172.31.{free}.0/24 "
+                        f"(in use: {sorted(used)})"
+                    )
+                return await _orig_create(
+                    self, proxmox_ids_start, sdn_config, vms_config
                 )
-            return await _orig_create(self, proxmox_ids_start, sdn_config, vms_config)
 
         InfraCommands.create_sdn_and_vms = _create_with_free_subnet  # type: ignore[method-assign]
         _PATCHED = True
+
+
+def enable_same_host_parallelism(n: int) -> None:
+    """Allow up to `n` concurrent samples on the single PROXMOX_HOST.
+
+    Must be called before inspect_ai.eval() (the pool is initialised lazily at
+    eval start). For n <= 1 the host is still shared with other evals.
+    """
+    share_proxmox_host()
+    if n <= 1:
+        return
+    if os.environ.get("PROXMOX_CONFIG_FILE"):
+        raise RuntimeError(
+            "PROXMOX_CONFIG_FILE is already set; same-host parallelism only "
+            "applies to the single-host PROXMOX_* env configuration."
+        )
+
+    # Contains the password: private tempfile, never written into the repo.
+    fd, path = tempfile.mkstemp(prefix="proxmox-instances-", suffix=".json")
+    with os.fdopen(fd, "w") as f:
+        f.write(_instances_json(n))
+    os.chmod(path, 0o600)
+    os.environ["PROXMOX_CONFIG_FILE"] = path
 
     logger.info(f"same-host parallelism: {n} instances on {os.environ['PROXMOX_HOST']}")

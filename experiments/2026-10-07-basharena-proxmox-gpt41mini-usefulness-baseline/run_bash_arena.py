@@ -31,7 +31,7 @@ from control_arena.settings.bash_arena.task.dataset import DatasetSpec
 from inspect_ai import eval
 from inspect_ai.model import GenerateConfig, get_model
 
-from ooc_arena.bash_arena_proxmox import BashArenaProxmoxSetting
+from ooc_arena.bash_arena_proxmox import MAX_SANDBOXES, BashArenaProxmoxSetting
 from ooc_arena.monitor import full_transcript_monitor
 from ooc_arena.parallel import enable_same_host_parallelism
 
@@ -118,7 +118,10 @@ def main(
         eval_config=config,
         monitoring_scorers=monitoring_scorers,
     )
-    eval(tasks=tasks, sandbox_cleanup=True, log_dir=str(LOG_DIR))
+    # eval_args() carries time_limit, max_sandboxes and fail_on_error; they are
+    # eval()-level settings that get_control_task_product does not apply.
+    eval_args = {**config.eval_args(), "log_dir": str(LOG_DIR)}
+    eval(tasks=tasks, sandbox_cleanup=True, **eval_args)
 
 
 if __name__ == "__main__":
@@ -148,8 +151,9 @@ if __name__ == "__main__":
     parser.add_argument(
         "--max-sandboxes",
         type=int,
-        default=1,
-        help="Concurrent samples on the Proxmox host (each 6 GB RAM / 6 vCPU).",
+        default=MAX_SANDBOXES,
+        help="Concurrent samples on the Proxmox host (each 6 GB RAM / 6 vCPU; "
+        f"default {MAX_SANDBOXES} fills the host's 40 GB).",
     )
     parser.add_argument(
         "--message-limit",
