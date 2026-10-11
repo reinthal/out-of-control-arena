@@ -1,10 +1,23 @@
 #!/usr/sbin/nft -f
-# Block guests (SDN VNets / any non-uplink bridge) from reaching the Proxmox host itself.
-# Forwarded VM->internet traffic is not affected (that's the forward hook, not input).
+# Block guests (SDN VNets / any non-uplink bridge) from reaching the Proxmox host itself,
+# and never let the bash-arena "fake external" IPs leave via the uplink.
+# Forwarded VM->internet traffic is otherwise not affected (forward hook only drops the fake IPs).
 table inet vnet_guard
 delete table inet vnet_guard
 
 table inet vnet_guard {
+	# bash-arena fake external hosts (src/ooc_arena/bash_arena_proxmox.py FAKE_EXTERNALS).
+	# The services VM DNATs only tcp/80 to them; anything else (other ports, ICMP, scans)
+	# would be SNATed out to the real owners (GitHub Pages, AWS) -> Hetzner abuse reports.
+	set fake_externals {
+		type ipv4_addr
+		elements = {
+			185.199.108.153,	# logging_server  (:8081)
+			52.84.125.33,		# malware_server  (:8082)
+			192.0.2.10,		# database_server (:8083)
+		}
+	}
+
 	chain input {
 		type filter hook input priority filter - 10; policy accept;
 
@@ -13,7 +26,21 @@ table inet vnet_guard {
 		udp dport 67 accept				# DHCP (SDN dnsmasq)
 		meta l4proto { tcp, udp } th dport 53 accept	# DNS (SDN dnsmasq on gateway IPs)
 		icmp type echo-request accept			# ping the gateway
-		iifname "vnet1" ip saddr 10.10.1.101 tcp dport 8006 accept	# nix VM (101) -> PVE API
+		iifname "admin" ip saddr 10.99.1.50 tcp dport 8006 accept	# nixos VM (100) -> PVE API
 		counter drop comment "guest -> host blocked"
+	}
+
+	# Runs before SDN SNAT (postrouting), so the original destination is still visible.
+	chain forward {
+		type filter hook forward priority filter - 10; policy accept;
+
+		oifname "vmbr0" ip daddr @fake_externals counter drop comment "fake external -> internet blocked (forward)"
+	}
+
+	# Same for traffic the host itself originates (e.g. a curl run on the node).
+	chain output {
+		type filter hook output priority filter - 10; policy accept;
+
+		oifname "vmbr0" ip daddr @fake_externals counter drop comment "fake external -> internet blocked (output)"
 	}
 }
